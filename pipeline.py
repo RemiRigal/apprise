@@ -10,8 +10,15 @@ def pipeline() -> co.Serial:
     """
     Define our Full Conducto Pipeline
     """
+    # Pipeline to work when called from other paths
     os.chdir(os.path.dirname(__file__))
+
+    # Dockerfile Context
     context = '.'
+
+    # Shared Pipeline Directory
+    share = '/conducto/data/pipeline/apprise'
+
     dockerfiles = (
         # Define our Containers
         ("Python 3.9", os.path.join('.conducto', 'Dockerfile.py39')),
@@ -23,23 +30,22 @@ def pipeline() -> co.Serial:
     )
 
     # find generated coverage filename and store it in the pipeline
-    set_coverage_template = cleandoc('''
-        find . -mindepth 1 -maxdepth 1 -type f \\
-            -name '.coverage.*' -exec \\
-                conducto-data-pipeline put \\
-                    --name "coverage.{tick}" --file {{}} \;''')
+    coverage_template = cleandoc('''
+        mkdir --verbose -p {share} && \\
+           coverage run --parallel -m pytest && \\
+             find . -mindepth 1 -maxdepth 1 -type f \\
+                 -name '.coverage.*' \\
+                 -exec mv --verbose -- {{}} {share} \;''')
 
     # pull generated file from the pipeline and place it back into
     # our working directory
-    get_coverage_template = cleandoc('''
-        id=0
+    coverage_report_template = cleandoc('''
+        find {share} -mindepth 1 -maxdepth 1 -type f \\
+            -name '.coverage.*' \\
+            -exec mv --verbose -- {{}} . \;
 
-        while [ $id < {ticks} ]; do
-            conducto-data-pipeline get --name coverage.$id --file .coverage.$id
-            let id+=1
-        done
-
-        coverage combine && coverage report''')
+        coverage combine . && \\
+            coverage report --ignore-errors --skip-covered --show-missing ''')
 
     # Our base image is always the first entry defined in our dockerfiles
     base_image = co.Image(dockerfile=dockerfiles[0][1], context=context)
@@ -64,13 +70,12 @@ def pipeline() -> co.Serial:
                 # The idea here is that the .coverage.* file is unique
                 # from others being built in other containers
                 co.Exec(
-                    'coverage run --parallel -m pytest && ' +
-                    set_coverage_template.format(tick=no),
+                    coverage_template.format(share=share),
                     name="{} Coverage".format(name), image=image)
 
         # Coverage Reporting
         co.Exec(
-            get_coverage_template.format(ticks=len(dockerfiles)),
+            coverage_report_template.format(share=share),
             name="Test Code Coverage", image=base_image)
 
     return pipeline

@@ -10,15 +10,13 @@ def pipeline() -> co.Serial:
     """
     Define our Full Conducto Pipeline
     """
-    # Pipeline to work when called from other paths
-    os.chdir(os.path.dirname(__file__))
-
     # Dockerfile Context
     context = '.'
 
     # Shared Pipeline Directory
     share = '/conducto/data/pipeline/apprise'
 
+    # Unit Testing
     dockerfiles = (
         # Define our Containers
         ("Python 3.9", os.path.join('.conducto', 'Dockerfile.py39')),
@@ -27,6 +25,38 @@ def pipeline() -> co.Serial:
         ("Python 3.6", os.path.join('.conducto', 'Dockerfile.py36')),
         ("Python 3.5", os.path.join('.conducto', 'Dockerfile.py35')),
         ("Python 2.7", os.path.join('.conducto', 'Dockerfile.py27')),
+    )
+
+    # Package Templates
+    el7_rpm_pkg_template = cleandoc('''
+        find apprise/dist -type f -name '*.gz' \\
+            -exec mv --verbose {} apprise/packaging/redhat/ \;
+        find apprise/packaging/man -type f -name '*.1' \\
+            -exec mv --verbose {} apprise/packaging/redhat/ \;
+
+        rpmbuild -bs apprise/packaging/redhat/python-apprise.spec && \\
+            sudo yum-builddep -y rpm/*.rpm && \\
+                rpmbuild -bb apprise/packaging/redhat/python-apprise.spec''')
+
+    el8_rpm_pkg_template = cleandoc('''
+        ronn --roff apprise/packaging/man/apprise.md || exit 1
+
+        find apprise/dist -type f -name '*.gz' \\
+            -exec mv --verbose {} apprise/packaging/redhat/ \;
+        find apprise/packaging/man -type f -name '*.1' \\
+            -exec mv --verbose {} apprise/packaging/redhat/ \;
+
+        rpmbuild -bs apprise/packaging/redhat/python-apprise.spec && \\
+            sudo dnf builddep -y rpm/*.rpm && \\
+                rpmbuild -bb apprise/packaging/redhat/python-apprise.spec''')
+
+    # Package Testing
+    pkg_dockerfiles = (
+        # Define our Containers
+        ("EL8 RPM", os.path.join('.conducto', 'Dockerfile.el8'),
+            el8_rpm_pkg_template),
+        ("EL7 RPM", os.path.join('.conducto', 'Dockerfile.el7'),
+            el7_rpm_pkg_template),
     )
 
     # find generated coverage filename and store it in the pipeline
@@ -45,19 +75,28 @@ def pipeline() -> co.Serial:
             -exec mv --verbose -- {{}} . \;
 
         coverage combine . && \\
-            coverage report --ignore-errors --skip-covered --show-missing ''')
+            coverage report --ignore-errors --skip-covered --show-missing''')
 
     # Our base image is always the first entry defined in our dockerfiles
     base_image = co.Image(dockerfile=dockerfiles[0][1], context=context)
+    base_pkg_image = \
+        co.Image(dockerfile=pkg_dockerfiles[0][1], context=context)
 
     with co.Serial() as pipeline:
-        # Code Styles
-        co.Exec(
-            'flake8 . --count --show-source --statistics',
-            name="Style Guidelines", image=base_image)
+        with co.Parallel(name="Presentation"):
+            # Code Styles
+            co.Exec(
+                'flake8 . --count --show-source --statistics',
+                name="Style Guidelines", image=base_image)
+
+            # RPM Checking
+            co.Exec(
+                cleandoc('''rpmlint --verbose -o "NetworkEnabled False" \\
+                            packaging/redhat/python-apprise.spec'''),
+                name="RPM Guidelines", image=base_pkg_image)
 
         with co.Parallel(name="Tests"):
-            for no, entry in enumerate(dockerfiles):
+            for entry in dockerfiles:
                 name, dockerfile = entry
                 image = co.Image(dockerfile=dockerfile, context=context)
                 # Unit Tests
@@ -77,6 +116,14 @@ def pipeline() -> co.Serial:
         co.Exec(
             coverage_report_template.format(share=share),
             name="Test Code Coverage", image=base_image)
+
+        with co.Parallel(name="Packaging"):
+            for entry in pkg_dockerfiles:
+                name, dockerfile, cmd = entry
+                image = co.Image(dockerfile=dockerfile, context=context)
+
+                # Build our packages
+                co.Exec(cmd, name=name, image=image)
 
     return pipeline
 

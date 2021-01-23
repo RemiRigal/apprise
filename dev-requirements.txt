@@ -5,6 +5,7 @@ pytest
 pytest-cov
 tox
 babel
+
 #
 # Plugin Dependencies
 #
